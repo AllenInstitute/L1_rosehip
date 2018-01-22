@@ -14,11 +14,11 @@ source(paste0(scriptsFolder,"violin_functions.R"))
 source(paste0(scriptsFolder,"heatmap_functions.R"))
 
 ## Read in the table of genes and clusters for each plot
-gcTable = read.csv(paste0(inputFolder,"plot_input.csv"))
+hgncTable = read.csv(paste0(inputFolder,"HGNC_input.csv"))
 
 ## Make the plots and save them as pdf files.
-for (i in unique(gcTable$plotNumber)){
-  plotTable   = gcTable[gcTable$plotNumber==i,]
+for (i in unique(hgncTable$plotNumber)){
+  plotTable   = hgncTable[hgncTable$plotNumber==i,]
   eval(parse(text=paste0("clusters = c(",plotTable$clusters[1],")"))) # Read clusters
   genes       = as.character(plotTable$Gene)
   shinyFolder = paste0(inputFolder, plotTable$species[1], "/")
@@ -35,7 +35,7 @@ for (i in unique(gcTable$plotNumber)){
   }
   if(plotType=="violin"){
     genes = genes[length(genes):1]
-    group_violin_plot(data_source = shinyFolder, group_by = groupBy, clusters=clusters, genes=genes)
+    group_violin_plot(data_source = shinyFolder, group_by = groupBy, clusters=clusters, genes=genes, sort=TRUE)
 	ggsave(fileName, width = width/2, height = height/2)
   }  
 }
