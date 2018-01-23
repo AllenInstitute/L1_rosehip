@@ -20,6 +20,7 @@ hgncTable = read.csv(paste0(inputFolder,"HGNC_input.csv"))
 for (i in unique(hgncTable$plotNumber)){
   plotTable   = hgncTable[hgncTable$plotNumber==i,]
   eval(parse(text=paste0("clusters = c(",plotTable$clusters[1],")"))) # Read clusters
+  # clusters    = c(4,3,7,5,8,10,18,9,13,14,22,1,12,6,15,19)  # All clusters
   genes       = as.character(plotTable$Gene)
   shinyFolder = paste0(inputFolder, plotTable$species[1], "/")
   fileName    = paste0(outputFolder,plotTable$plot,"_",plotTable$species,".pdf")[1]
