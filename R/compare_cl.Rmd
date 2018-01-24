@@ -1,0 +1,241 @@
+---
+title: "Cell type homology"
+output: html_notebook
+---
+  
+  
+```{r init-workspace, echo=FALSE, message=FALSE, warning=FALSE}
+# Load libraries 
+library(feather)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+library(pheatmap)
+library(boot)
+library(limma)
+
+# Load functions
+calc_beta <- function(y, spec.exp = 2) {
+  d1 <- as.matrix(dist(y))
+  eps1 <- 1e-10
+  # Marker score is combination of specificity and sparsity
+  score1 <- sum(d1^spec.exp) / (sum(d1) + eps1)
+  return(score1)
+}
+
+```
+
+
+```{r load-data}
+all.paths <- c("../data/human/",
+               "../data/mouse/",
+               "../data/human_Lake2016/")
+names(all.paths) <- c("Human", "Mouse_Tasic2016", "Human_Lake2016")
+paths <- all.paths[c("Human", "Human_Lake2016")]  # Figure 4B, S4B,C
+
+dend <- list()
+anno <- list()
+anno.cl <- list()
+prop.all <- list()
+for (dat1 in names(paths)) {
+  if (file.exists(paste0(paths[[dat1]], "dend.RData"))) {
+    dend[[dat1]] <- readRDS(paste0(paths[[dat1]], "dend.RData"))
+  }
+  anno[[dat1]] <- as.data.frame(read_feather(paste0(paths[[dat1]], "anno.feather")))
+  prop1 <- as.data.frame(t(read_feather(paste0(paths[[dat1]], "prop.feather"))))
+  rownames(prop1) <- toupper(rownames(prop1))
+  
+  if (dat1 == "Human") {
+    clus.lab <- sapply(unique(anno[[dat1]]$cluster_label), function(x) strsplit(x, "_")[[1]][1])
+    colnames(prop1) <- clus.lab
+    keep.cl <- colnames(prop1)[grep("^i", colnames(prop1))]
+    anno.cl1 <- data.frame(cluster_label = unique(anno[[dat1]][, c("cluster_label")]))
+  } else if (dat1 == "Human_Lake2016") {
+    colnames(anno[[dat1]])[colnames(anno[[dat1]]) == "SubGroup"] <- "cluster_label"
+    colnames(prop1) <- levels(anno[[dat1]]$cluster_label)
+    keep.cl <- colnames(prop1)[grep("^In", colnames(prop1))]
+    anno.cl1 <- data.frame(cluster_label = unique(anno[[dat1]][, c("cluster_label")]))
+  } else if (dat1 == "Mouse_Tasic2016") {
+    colnames(anno[[dat1]])[colnames(anno[[dat1]]) == "final_label"] <- "cluster_label"
+    anno[[dat1]]$cluster_label <- sub("^[0-9]+ f[0-9]+ ", "", anno[[dat1]]$cluster_label)
+    colnames(prop1) <- unique(anno[[dat1]]$cluster_label)
+    keep.cl <- unique(anno[[dat1]]$cluster_label[order(anno[[dat1]]$final_id)])
+    keep.cl <- keep.cl[keep.cl != ""]
+    keep.cl <- keep.cl[c(1:23)]  # Neuronal cell types
+    anno[[dat1]] <- droplevels(subset(anno[[dat1]], cluster_label %in% keep.cl))
+    anno.cl1 <- data.frame(cluster_label = unique(anno[[dat1]][, c("cluster_label")]))
+  }
+  
+  # Common annotation
+  cl.size <- table(anno[[dat1]]$cluster_label)
+  anno.cl1$size <- cl.size[match(names(cl.size), anno.cl1$cluster_label)]
+  anno.cl[[dat1]] <- anno.cl1[match(keep.cl, anno.cl1$cluster_label), ]
+  anno[[dat1]] <- droplevels(subset(anno[[dat1]], cluster_label %in% keep.cl))
+  prop1.subset <- prop1[, match(keep.cl, colnames(prop1))]
+  prop.all[[dat1]] <- prop1.subset
+}
+
+```
+
+
+
+```{r process-data, echo=FALSE}
+prop <- prop.all
+
+shared.genes <- intersect(rownames(prop[[1]]), rownames(prop[[2]]))
+
+cnt <- list()
+for (dat1 in names(paths)) {
+  prop[[dat1]] <- prop[[dat1]][shared.genes, ]
+  cnt[[dat1]] <- apply(prop[[dat1]], 1, function(x) sum(x > 0.5))
+}
+
+```
+
+
+```{r calc-marker-scores}
+beta <- list()
+for (dat1 in names(paths)) {
+  beta[[dat1]] <- apply(prop[[dat1]], 1, calc_beta)
+}
+
+```
+
+
+#### Select genes that mark clusters in both data sets.
+```{r subset-genes}
+# Empirical trade-off between number of genes and cell type specificity
+cnt1.max <- ncol(prop[[1]]) / 1; cnt2.max <- ncol(prop[[2]]) / 1
+keep.genes <- which(cnt[[1]] < cnt1.max & cnt[[2]] < cnt2.max & 
+                      cnt[[1]] > 0 & cnt[[2]] > 0 & 
+                      beta[[1]] > 0.3 & beta[[2]] > 0.3)
+
+
+prop.subset <- list()
+cnt.subset <- list()
+score.subset <- list()
+for (dat1 in names(paths)) {
+  prop.subset[[dat1]] <- prop[[dat1]][keep.genes, ]  # grep("L5a", colnames(prop[[dat1]]))
+  cnt.subset[[dat1]] <- cnt[[dat1]][keep.genes]
+  score.subset[[dat1]] <- beta[[dat1]][keep.genes]
+}
+
+```
+
+
+
+```{r match-clusters}
+cl.pairs <- expand.grid(colnames(prop.subset[[1]]), colnames(prop.subset[[2]]))
+
+cor.all <- NULL
+cor.wt <- score.subset[[1]] * score.subset[[2]]
+for (i in 1:nrow(cl.pairs)) {
+  cl1 <- cl.pairs[i, 1]
+  cl2 <- cl.pairs[i, 2]
+  cor1 <- cov.wt(cbind(prop.subset[[1]][, cl1], prop.subset[[2]][, cl2]), wt = cor.wt,
+                 center = TRUE, cor = TRUE)$cor[1, 2]  # Weighted cor
+  cor.all <- c(cor.all, cor1)
+}
+names(cor.all) <- apply(cl.pairs, 1, function(x) paste(x, collapse = "~"))
+
+# tail(sort(cor.all), 20)
+
+```
+
+
+### Compare expression of marker genes between species
+#### Correlate proportion of cells/nuclei in each cluster expressing marker genes with FPKM > 1.
+```{r plot-cor-heatmap, fig.width = 12.5, fig.height = 4.5}
+cor.m <- matrix(0, ncol(prop.subset[[1]]), ncol(prop.subset[[2]]), 
+                dimnames = list(colnames(prop.subset[[1]]),
+                                colnames(prop.subset[[2]])))
+
+counter <- 0
+for (i in 1:nrow(cl.pairs)) {
+  counter <- counter + 1
+  cl1 <- cl.pairs[i, 1]
+  cl2 <- cl.pairs[i, 2]
+  cor.m[cl1, cl2] <- cor.all[counter]
+}
+
+# Reorder rows
+cor.order <- order(apply(cor.m, 1, which.max))
+cor.m <- cor.m[cor.order, ]
+
+cor.ml <- melt(cor.m)
+
+g1 <- ggplot(cor.ml, aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile(color = "grey80") +
+  scale_y_discrete(limits = rev(levels(cor.ml$Var1))) +
+  # scale_fill_gradient2(low = "dark blue", high = "red", mid = "white",
+  #  midpoint = 0, limit = c(min(cor.m), max(cor.m)), space = "Lab", name="Correlation") +
+  guides(fill=guide_colorbar("Correlation")) +
+  # scale_fill_gradientn(colors = rev(brewer.pal(n = 7, name = "RdYlBu")),
+  #                      guide = "colorbar") +
+  scale_fill_gradientn(colors = c(rev(brewer.pal(9, "Blues")), "white",
+                                  brewer.pal(9, "Reds")), 
+                       guide = "colorbar", limits = c(-1, 1)) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  xlab(names(paths)[2]) +
+  ylab(names(paths)[1])
+plot(g1)
+ggsave(g1, filename = paste0("../output/", names(paths)[1],
+                             "_vs_", names(paths)[2], "_heatmap.pdf"), 
+       width = 4, height = 3)
+
+```
+
+#### For unique best matching clusters, plot expression of marker genes.
+#### Label genes that are cell type specific in both data sets.
+```{r plot-cl-pair, fig.height = 12, fig.width = 12}
+row.max <- t(apply(cor.m, 1, function(x) ifelse(x == max(x), 1, 0)))
+col.max <- apply(cor.m, 2, function(x) ifelse(x == max(x), 2, 0))
+cor.m2 <- row.max + col.max
+
+cl.match <- cbind(rownames(cor.m2),
+                  colnames(cor.m2)[apply(cor.m2, 1, which.max)])
+good.match <- which(apply(cor.m2, 1, max) >= 3 & apply(cor.diffm, 1, max) > 0)
+cl.to.plot <- cl.match[good.match, ]
+
+if (nrow(cl.to.plot) > 0) {
+  shared.marker.genes <- list()
+  pdf(file = paste0("../output/", names(paths)[1],
+                             "_vs_", names(paths)[2], "_cl_match_cor.pdf"), 
+      width = 8, height = 10)
+  par(mfrow = c(ceiling(sqrt(nrow(cl.to.plot))), ceiling(sqrt(nrow(cl.to.plot)))))
+  cl1.labs <- cl.to.plot[, 1]
+  cl2.labs <- cl.to.plot[, 2]
+  for (i in 1:nrow(cl.to.plot)) {
+    cl1 <- cl.to.plot[i, 1]
+    cl2 <- cl.to.plot[i, 2]
+    cl1.lab <- cl1.labs[i]
+    cl2.lab <- cl2.labs[i]
+    
+    cor1 <- cov.wt(cbind(prop.subset[[1]][, cl1], prop.subset[[2]][, cl2]), wt = cor.wt,
+                   center = TRUE, cor = TRUE)$cor[1, 2]  # Weighted cor
+    label.genes <- prop.subset[[1]][, cl1] > 0.5 & prop.subset[[2]][, cl2] > 0.5 &
+      (cnt.subset[[1]] == 1 | cnt.subset[[2]] == 1)
+    
+    plot(jitter(prop.subset[[1]][, cl1]),
+         jitter(prop.subset[[2]][, cl2]), 
+         pch = 19, cex = 0.2, col = "grey", las = 1,
+         xlim = c(0, 1), ylim = c(0, 1), xlab = cl1.lab, ylab = cl2.lab, 
+         main = paste("r =", signif(cor1, 2)))
+    abline(0, 1, col = "grey")
+    if (sum(label.genes) > 0) {
+      text(jitter(prop.subset[[1]][label.genes, cl1]),
+           jitter(prop.subset[[2]][label.genes, cl2]), 
+           rownames(prop.subset[[1]])[label.genes], cex = 0.6)
+      cl.pair.name <- paste(cl1.lab, cl2.lab)
+      shared.marker.genes[[cl.pair.name]] <- paste0(rownames(prop.subset[[1]])[label.genes],
+                                                    collapse = ",")
+    }
+  }
+  dev.off()
+}
+
+```
+
+
